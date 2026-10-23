@@ -10,6 +10,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `collapsedLines` config option for the collapsed overlay. `2` (the default) keeps the historical three-row shape — heading, `└─ <key> to expand` hint, trailing spacer. `1` folds the hint onto the heading row and drops the spacer, so a collapsed panel occupies a single terminal row. Read per render; values other than `1` and `2` fall back to the default.
+- Clicking the overlay's heading row toggles the collapsed state, for terminals where the configured shortcut never arrives. Only an unmodified left click on that row counts — task rows, modified clicks, drags and wheel events are untouched — and it works with `collapseKey: "off"`. Needs Pi's fullscreen mouse dispatch; hosts without it keep the keyboard-only behavior.
 
 ## [2.13.10] - 2026-10-23
 
