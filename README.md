@@ -44,7 +44,6 @@ and again to expand it. Clicking the heading row toggles it too. Set
 `collapsedLines` to `1` to fold that hint onto the heading row and drop the
 spacer, so a collapsed panel costs a single row instead of three. Run `/todos` at
 any time to print the full list grouped by status.
-
 ## What you get
 
 - **The plan stays on screen.** A panel above the editor shows every task with a
