@@ -1,17 +1,37 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { TuiMouseEvent } from "@earendil-works/pi-tui";
 import { createMockCtx, createMockPi, createMockUI, makeTheme } from "@juicesharp/rpiv-test-utils";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { isTaskDetails, replayFromBranch } from "./state/replay.ts";
 import { replaceState } from "./state/store.ts";
 import { __resetState, registerTodoTool, setActiveRenderSession } from "./todo.ts";
 import { TodoOverlay } from "./todo-overlay.ts";
 import { formatOverlayTaskLine } from "./view/format.ts";
 
+// Vitest hoists this before runtime imports, including config consumers in test utilities.
+const { testHome, configPath } = await vi.hoisted(async () => {
+	const { mkdtempSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const testHome = mkdtempSync(join(tmpdir(), "todo-upstream-repair-"));
+	vi.stubEnv("HOME", testHome);
+	vi.stubEnv("USERPROFILE", testHome);
+	vi.stubEnv("XDG_CONFIG_HOME", join(testHome, ".config"));
+	vi.stubEnv("PI_CODING_AGENT_DIR", join(testHome, ".pi", "agent"));
+	return { testHome, configPath: join(testHome, ".config", "rpiv-todo", "config.json") };
+});
+
 const theme = makeTheme() as unknown as Theme;
-const configPath = join(process.env.HOME!, ".config", "rpiv-todo", "config.json");
+
+afterAll(() => {
+	try {
+		rmSync(testHome, { recursive: true, force: true });
+	} finally {
+		vi.unstubAllEnvs();
+	}
+});
 
 afterEach(() => {
 	__resetState();
