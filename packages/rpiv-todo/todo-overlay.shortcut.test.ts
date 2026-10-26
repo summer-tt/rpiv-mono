@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { createMockCtx, createMockPi } from "@juicesharp/rpiv-test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import registerTodo from "./index.ts";
+import { getRenderState } from "./state/store.ts";
 import { __resetState } from "./todo.ts";
 
 const CONFIG_PATH = join(process.env.HOME!, ".config", "rpiv-todo", "config.json");
@@ -132,6 +133,45 @@ describe("rpiv-todo — collapse/expand shortcut registration", () => {
 		// Toggle again → re-expands; hint gone.
 		await captured.shortcuts.get("ctrl+shift+t")?.handler?.(ctx as never);
 		expect(widget.render(200).some((l) => l.includes("ctrl+shift+t to expand"))).toBe(false);
+	});
+});
+
+describe("rpiv-todo — configured shortcut three-state cycle", () => {
+	it("uses alt+t to expand more, collapse, and return to the normal view", async () => {
+		writeConfigFile(JSON.stringify({ collapseKey: "alt+t" }));
+		const { captured, sessionStart, toolEnd, tool } = setup();
+		const ctx = createMockCtx({ sessionId: "s1", hasUI: true });
+		await sessionStart({} as never, ctx as never);
+		for (let i = 0; i < 16; i++) {
+			await tool.execute!("tc", { action: "create", subject: `task ${i}` }, undefined, undefined, ctx as never);
+		}
+		await toolEnd({ toolName: "todo", isError: false });
+		const factory = (ctx.ui.setWidget as ReturnType<typeof vi.fn>).mock.calls[0][1];
+		const widget = factory({ requestRender: vi.fn() }, { fg: (_color: string, text: string) => text });
+		const press = () => captured.shortcuts.get("alt+t")!.handler(ctx as never);
+		expect(widget.render(80).join("\n")).toContain("more");
+		await press();
+		expect(widget.render(80)).toHaveLength(18);
+		await press();
+		expect(widget.render(80).join("\n")).toContain("alt+t to expand");
+		await press();
+		expect(widget.render(80).join("\n")).toContain("more");
+		await press();
+		const branch = [{ type: "custom", customType: "rpiv-todo-state", data: getRenderState() }];
+		(ctx.sessionManager.getBranch as ReturnType<typeof vi.fn>).mockReturnValue(branch);
+		await captured.events.get("session_compact")![0]({} as never, ctx as never);
+		expect(widget.render(80)).toHaveLength(18); // replay preserves the current view
+		await captured.events.get("session_shutdown")![0]({} as never, ctx as never);
+		expect(widget.render(80)).toEqual([]);
+		await press(); // disposed shortcut is a no-op
+
+		// Reload replaces the extension factory and replays persisted task data.
+		const reloaded = setup();
+		const resumedCtx = createMockCtx({ sessionId: "s1", hasUI: true, branch: branch as never });
+		await reloaded.sessionStart({} as never, resumedCtx as never);
+		const resumedFactory = (resumedCtx.ui.setWidget as ReturnType<typeof vi.fn>).mock.calls[0][1];
+		const resumedWidget = resumedFactory({ requestRender: vi.fn() }, { fg: (_color: string, text: string) => text });
+		expect(resumedWidget.render(80).join("\n")).toContain("more");
 	});
 });
 
