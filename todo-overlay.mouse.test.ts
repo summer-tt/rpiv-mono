@@ -130,12 +130,12 @@ describe("TodoOverlay — header click toggles the panel", () => {
 		}
 	});
 
-	it("ignores press, release, drag, move and wheel events", async () => {
+	it("claims press/release without toggling and ignores drag, move and wheel events", async () => {
 		for (const type of ["press", "release", "drag", "move", "wheel"] as const) {
 			const { widget } = await setup(twoTasks);
 			const result = widget.handleMouse?.(headingClick({ type }));
 			expect(isCollapsed(widget)).toBe(false);
-			expect(result).toBeUndefined();
+			expect(result).toEqual(type === "press" || type === "release" ? { handled: true, render: false } : undefined);
 		}
 	});
 

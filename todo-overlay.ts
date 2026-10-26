@@ -13,8 +13,13 @@
  */
 
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
-import type { TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
-import { type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+	type TUI,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import { COLLAPSE_KEY_OFF, getCollapsedLines, getMaxWidgetLines, resolveCollapseKey } from "./config.ts";
 import { formatStatusLabel, t } from "./state/i18n-bridge.ts";
 import { selectHasActive, selectOverlayLayout, selectShowTaskIds, selectTodoCounts } from "./state/selectors.ts";
@@ -22,9 +27,6 @@ import { getRenderState } from "./state/store.ts";
 import { formatOverlayTaskLine } from "./view/format.ts";
 
 const WIDGET_KEY = "rpiv-todos";
-
-/** Local row index of the heading inside the rendered widget. */
-const HEADING_ROW = 0;
 
 // English fallbacks for localized overlay chrome strings.
 const OVERLAY_HEADING = "Todos";
@@ -40,11 +42,16 @@ export class TodoOverlay {
 	private hiddenCompletedTaskIds = new Set<number>();
 	private lastNextId: number | undefined;
 	private collapsed = false;
+	private fullyExpanded = false;
+	private widgetGeneration = 0;
+	private moreHit: { row: number; width: number; columns: number } | undefined;
 
 	setUICtx(ctx: ExtensionUIContext): void {
 		// Identity-compare so repeat session_start handlers are idempotent;
 		// on identity change (/reload) invalidate so update() re-registers.
 		if (ctx !== this.uiCtx) {
+			this.widgetGeneration++;
+			this.moreHit = undefined;
 			this.uiCtx = ctx;
 			this.widgetRegistered = false;
 			this.tui = undefined;
@@ -58,6 +65,8 @@ export class TodoOverlay {
 
 		if (visible.length === 0) {
 			if (this.widgetRegistered) {
+				this.widgetGeneration++;
+				this.moreHit = undefined;
 				this.uiCtx.setWidget(WIDGET_KEY, undefined);
 				this.widgetRegistered = false;
 				this.tui = undefined;
@@ -66,17 +75,24 @@ export class TodoOverlay {
 		}
 
 		if (!this.widgetRegistered) {
+			const generation = ++this.widgetGeneration;
 			this.uiCtx.setWidget(
 				WIDGET_KEY,
 				(tui, factoryTheme) => {
 					this.tui = tui;
 					return {
-						render: (width: number) => this.renderWidget(this.uiCtx?.theme ?? factoryTheme, width),
+						render: (width: number) =>
+							generation === this.widgetGeneration
+								? this.renderWidget(this.uiCtx?.theme ?? factoryTheme, width)
+								: [],
+						handleMouse: (event: TuiMouseEvent) =>
+							generation === this.widgetGeneration ? this.handleMouse(event) : undefined,
 						invalidate: () => {
+							if (generation !== this.widgetGeneration) return;
+							this.moreHit = undefined;
 							// No rendered strings are cached. Pi invalidates on theme changes;
 							// the next render reads uiCtx.theme.
 						},
-						handleMouse: (event: TuiMouseEvent) => this.handleHeadingClick(event),
 					};
 				},
 				{ placement: "aboveEditor" },
@@ -85,22 +101,6 @@ export class TodoOverlay {
 		} else {
 			this.tui?.requestRender();
 		}
-	}
-
-	/** Toggle the panel from a click on the heading row.
-	 *
-	 * Only an unmodified left click counts: task rows keep their own meaning (and
-	 * there is no per-task action yet), while modified clicks, drags, wheels and
-	 * press/release events stay available to the transcript's selection, scrolling
-	 * and app-level bindings. The heading renders in both states, so the same row
-	 * collapses and expands. Hosts without mouse dispatch never call this and keep
-	 * the keyboard-only behavior. */
-	private handleHeadingClick(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-		if (event.type !== "click" || event.button !== "left") return undefined;
-		if (event.shift || event.alt || event.ctrl) return undefined;
-		if (event.y !== HEADING_ROW) return undefined;
-		this.toggleCollapse();
-		return { handled: true };
 	}
 
 	resetCompletedDisplayState(): void {
@@ -119,8 +119,22 @@ export class TodoOverlay {
 	}
 
 	toggleCollapse(): void {
-		this.collapsed = !this.collapsed;
-		// Forced full redraw on the collapsed↔expanded height step, mirroring the
+		if (this.collapsed) {
+			this.collapsed = false;
+			this.fullyExpanded = false;
+		} else {
+			const snapshot = this.getSnapshot();
+			const tasks = this.selectOverlayTasks(snapshot);
+			const layout = this.getLayout({ tasks, nextId: snapshot.nextId });
+			if (layout.hiddenCompleted > 0 || layout.truncatedTail > 0) {
+				this.fullyExpanded = true;
+			} else {
+				this.collapsed = true;
+				this.fullyExpanded = false;
+			}
+		}
+		this.moreHit = undefined;
+		// Forced full redraw on each view-height step, mirroring the
 		// lane-dock's requestRender(shapeChanged); distinct from the non-forced
 		// requestRender() refresh paths in update()/hideCompletedTasksFromPreviousTurn().
 		this.tui?.requestRender(true);
@@ -156,7 +170,47 @@ export class TodoOverlay {
 		return task.status === "completed" && this.hiddenCompletedTaskIds.has(task.id);
 	}
 
+	private getLayout(state: ReturnType<TodoOverlay["getSnapshot"]>) {
+		const budget =
+			this.fullyExpanded || this.uiCtx?.getToolsExpanded?.() === true ? state.tasks.length : getMaxWidgetLines() - 1;
+		return selectOverlayLayout(state, budget);
+	}
+
+	private handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.button !== "left" || event.shift || event.alt || event.ctrl) return undefined;
+		const heading = event.y === 0 && event.x >= 0 && event.x < event.width;
+		if (heading) {
+			// Claim press/release so the host can synthesize a click without moving focus.
+			if (event.type === "press" || event.type === "release") return { handled: true, render: false };
+			if (event.type !== "click") return undefined;
+			this.collapsed = !this.collapsed;
+			this.fullyExpanded = false;
+			this.moreHit = undefined;
+			this.tui?.requestRender(true);
+			return { handled: true, render: false };
+		}
+		const hit = this.moreHit;
+		if (
+			!hit ||
+			event.button !== "left" ||
+			event.width !== hit.width ||
+			event.y !== hit.row ||
+			event.x < 0 ||
+			event.x >= hit.columns
+		)
+			return undefined;
+		// Pi synthesizes click after a handled press and a release at the same
+		// cell. Claim the press without requesting keyboard focus or capture.
+		if (event.type === "press" || event.type === "release") return { handled: true, render: false };
+		if (event.type !== "click") return undefined;
+		this.fullyExpanded = true;
+		this.moreHit = undefined;
+		this.tui?.requestRender(true);
+		return { handled: true, render: false };
+	}
+
 	private renderWidget(theme: Theme, width: number): string[] {
+		this.moreHit = undefined;
 		const snapshot = this.getSnapshot();
 		const overlayTasks = this.selectOverlayTasks(snapshot);
 		if (overlayTasks.length === 0) return [];
@@ -201,8 +255,7 @@ export class TodoOverlay {
 		// Pi's global tool-output expansion mode is read on every render so its
 		// expand/collapse shortcut also expands this live widget. Optional chaining
 		// preserves compatibility with hosts predating getToolsExpanded().
-		const bodyBudget = this.uiCtx?.getToolsExpanded?.() === true ? overlayTasks.length : getMaxWidgetLines() - 1;
-		const layout = selectOverlayLayout(overlayState, bodyBudget);
+		const layout = this.getLayout(overlayState);
 		for (const task of layout.visible) {
 			lines.push(truncate(`${theme.fg("dim", "├─")} ${formatOverlayTaskLine(task, theme, showIds)}`));
 		}
@@ -232,7 +285,9 @@ export class TodoOverlay {
 		const more = t("overlay.more", OVERLAY_MORE);
 		const summary =
 			overflowParts.length > 0 ? `+${totalHidden} ${more} (${overflowParts.join(", ")})` : `+${totalHidden} ${more}`;
-		lines.push(truncate(`${theme.fg("dim", "└─")} ${theme.fg("dim", summary)}`));
+		const summaryLine = truncate(`${theme.fg("dim", "└─")} ${theme.fg("dim", summary)}`);
+		this.moreHit = { row: lines.length, width, columns: visibleWidth(summaryLine) };
+		lines.push(summaryLine);
 		return this.withTrailingSpacer(lines);
 	}
 
@@ -250,11 +305,15 @@ export class TodoOverlay {
 	}
 
 	dispose(): void {
-		if (this.uiCtx) this.uiCtx.setWidget(WIDGET_KEY, undefined);
+		this.widgetGeneration++;
+		this.moreHit = undefined;
+		const uiCtx = this.uiCtx;
 		this.widgetRegistered = false;
 		this.tui = undefined;
 		this.uiCtx = undefined;
 		this.collapsed = false;
+		this.fullyExpanded = false;
 		this.resetCompletedDisplayState();
+		uiCtx?.setWidget(WIDGET_KEY, undefined);
 	}
 }
